@@ -38,6 +38,7 @@ tokenizers = { version = "0.22.2", default-features = false, features = ["onig"]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rustfft = "6.4"
+hf-hub = { version = "0.4", optional = true }
 
 [dev-dependencies]
 
@@ -54,5 +55,6 @@ openvino = ["ort/openvino"]
 webgpu = ["ort/webgpu"]
 nnapi = ["ort/nnapi"]
 sortformer = []
+hf-hub = ["dep:hf-hub"]
 load-dynamic = ["ort/load-dynamic"]
 preload-dylibs = ["ort/preload-dylibs"]

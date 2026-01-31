@@ -8,12 +8,17 @@ Usage:
   cargo run --release --features webgpu --example benchmark -- speech_samples/ --iterations 3
   cargo run --release --example benchmark -- speech_samples/           # CPU only
 
+  # Auto-download model from HuggingFace Hub (requires hf-hub feature):
+  cargo run --release --features webgpu,hf-hub --example benchmark -- speech_samples/ --hf-model altunenes/parakeet-rs --hf-revision main
+
 Options:
   --warmup N        Number of warmup runs (default: 1)
   --iterations N    Number of timed runs per file (default: 3, reports best-of)
   --model-dir DIR   Path to nemotron model directory (default: ./nemotron)
   --batch           Use non-streaming transcribe_audio() instead of per-chunk streaming
   --verbose         Enable ORT verbose logging to see EP node assignments
+  --hf-model REPO   HuggingFace repo ID (requires hf-hub feature)
+  --hf-revision REV HuggingFace revision/branch (default: main)
 */
 
 use parakeet_rs::{ExecutionConfig, ExecutionProvider, Nemotron};
@@ -213,6 +218,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut model_dir = "./nemotron".to_string();
     let mut batch_mode = false;
     let mut verbose = false;
+    #[allow(unused_mut)]
+    let mut hf_model: Option<String> = None;
+    #[allow(unused_mut)]
+    let mut hf_revision = "main".to_string();
 
     let mut i = 2;
     while i < args.len() {
@@ -237,8 +246,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 verbose = true;
                 i += 1;
             }
+            "--hf-model" => {
+                hf_model = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--hf-revision" => {
+                hf_revision = args.get(i + 1).cloned().unwrap_or(hf_revision);
+                i += 2;
+            }
             _ => i += 1,
         }
+    }
+
+    // Download model from HuggingFace Hub if requested
+    #[cfg(feature = "hf-hub")]
+    if let Some(repo_id) = hf_model {
+        use hf_hub::api::sync::Api;
+
+        eprintln!(
+            "Fetching model from HuggingFace: {} (rev: {})...",
+            repo_id, hf_revision
+        );
+        let api = Api::new().expect("Failed to create HF Hub API client");
+        let repo = api.repo(hf_hub::Repo::with_revision(
+            repo_id.clone(),
+            hf_hub::RepoType::Model,
+            hf_revision.clone(),
+        ));
+
+        let files = ["encoder.onnx", "encoder.onnx.data", "decoder_joint.onnx", "tokenizer.model"];
+        let mut cached_dir: Option<PathBuf> = None;
+
+        for file in &files {
+            match repo.get(file) {
+                Ok(path) => {
+                    eprintln!("  {} -> {}", file, path.display());
+                    if cached_dir.is_none() {
+                        if let Some(parent) = path.parent() {
+                            cached_dir = Some(parent.to_path_buf());
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  {} -> FAILED: {}", file, e);
+                }
+            }
+        }
+
+        if let Some(dir) = cached_dir {
+            model_dir = dir.to_string_lossy().to_string();
+            eprintln!("Using cached model dir: {}\n", model_dir);
+        } else {
+            return Err("Failed to download any model files from HuggingFace".into());
+        }
+    }
+
+    #[cfg(not(feature = "hf-hub"))]
+    if hf_model.is_some() {
+        return Err("--hf-model requires the 'hf-hub' feature. Rebuild with: --features hf-hub".into());
     }
 
     // Enable ORT verbose logging to see EP node placement
