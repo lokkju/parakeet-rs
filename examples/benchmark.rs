@@ -9,7 +9,8 @@ Usage:
   cargo run --release --example benchmark -- speech_samples/           # CPU only
 
   # Auto-download model from HuggingFace Hub (requires hf-hub feature):
-  cargo run --release --features webgpu,hf-hub --example benchmark -- speech_samples/ --hf-model altunenes/parakeet-rs --hf-revision main
+  cargo run --release --features webgpu,hf-hub --example benchmark -- speech_samples/ \
+    --hf-model altunenes/parakeet-rs --hf-subdir nemotron-speech-streaming-en-0.6b
 
 Options:
   --warmup N        Number of warmup runs (default: 1)
@@ -18,6 +19,7 @@ Options:
   --batch           Use non-streaming transcribe_audio() instead of per-chunk streaming
   --verbose         Enable ORT verbose logging to see EP node assignments
   --hf-model REPO   HuggingFace repo ID (requires hf-hub feature)
+  --hf-subdir PATH  Subdirectory within the HF repo (e.g. nemotron-speech-streaming-en-0.6b)
   --hf-revision REV HuggingFace revision/branch (default: main)
 */
 
@@ -221,6 +223,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[allow(unused_mut)]
     let mut hf_model: Option<String> = None;
     #[allow(unused_mut)]
+    let mut hf_subdir: Option<String> = None;
+    #[allow(unused_mut)]
     let mut hf_revision = "main".to_string();
 
     let mut i = 2;
@@ -250,6 +254,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hf_model = args.get(i + 1).cloned();
                 i += 2;
             }
+            "--hf-subdir" => {
+                hf_subdir = args.get(i + 1).cloned();
+                i += 2;
+            }
             "--hf-revision" => {
                 hf_revision = args.get(i + 1).cloned().unwrap_or(hf_revision);
                 i += 2;
@@ -274,11 +282,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hf_revision.clone(),
         ));
 
-        let files = ["encoder.onnx", "encoder.onnx.data", "decoder_joint.onnx", "tokenizer.model"];
+        let model_files = ["encoder.onnx", "encoder.onnx.data", "decoder_joint.onnx", "tokenizer.model"];
         let mut cached_dir: Option<PathBuf> = None;
 
-        for file in &files {
-            match repo.get(file) {
+        for file in &model_files {
+            let hf_path = match &hf_subdir {
+                Some(sub) => format!("{}/{}", sub, file),
+                None => file.to_string(),
+            };
+            match repo.get(&hf_path) {
                 Ok(path) => {
                     eprintln!("  {} -> {}", file, path.display());
                     if cached_dir.is_none() {
