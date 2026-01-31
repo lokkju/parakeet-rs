@@ -306,30 +306,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // ORT requires external data files (encoder.onnx.data) to be in the
-        // same real directory as the model file. HF Hub stores files as symlinks
-        // to a blobs/ dir, which causes ORT's path validation to fail.
-        // Work around this by creating a staging directory with hardlinks.
+        // same real directory as the model file. HF Hub caches files as
+        // symlinks into a blobs/ dir with hash-based names, so ORT can't
+        // find the external data by its expected relative name.
+        // Fix: hardlink the resolved blobs into a staging dir under their
+        // original names. Hardlinks share inodes — no disk space is copied.
         let staging_dir = std::env::temp_dir().join("parakeet-rs-benchmark-model");
         std::fs::create_dir_all(&staging_dir)?;
 
         for (name, cached_path) in &cached_paths {
             let dest = staging_dir.join(name);
-            // Remove stale link/file if present
             let _ = std::fs::remove_file(&dest);
-            // Try hardlink first (fast, no copy), fall back to symlink, then copy
-            if std::fs::hard_link(cached_path, &dest).is_err() {
-                #[cfg(unix)]
-                {
-                    // Resolve the symlink target so we hardlink the actual blob
-                    let real_path = std::fs::canonicalize(cached_path)?;
-                    if std::fs::hard_link(&real_path, &dest).is_err() {
-                        std::fs::copy(&real_path, &dest)?;
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    std::fs::copy(cached_path, &dest)?;
-                }
+            let real_path = std::fs::canonicalize(cached_path)?;
+            if std::fs::hard_link(&real_path, &dest).is_err() {
+                // Cross-device or unsupported — fall back to copy
+                eprintln!("  warning: hardlink failed for {}, copying instead", name);
+                std::fs::copy(&real_path, &dest)?;
             }
         }
 
