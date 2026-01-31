@@ -283,7 +283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
 
         let model_files = ["encoder.onnx", "encoder.onnx.data", "decoder_joint.onnx", "tokenizer.model"];
-        let mut cached_dir: Option<PathBuf> = None;
+        let mut cached_paths: Vec<(String, PathBuf)> = Vec::new();
 
         for file in &model_files {
             let hf_path = match &hf_subdir {
@@ -293,11 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match repo.get(&hf_path) {
                 Ok(path) => {
                     eprintln!("  {} -> {}", file, path.display());
-                    if cached_dir.is_none() {
-                        if let Some(parent) = path.parent() {
-                            cached_dir = Some(parent.to_path_buf());
-                        }
-                    }
+                    cached_paths.push((file.to_string(), path));
                 }
                 Err(e) => {
                     eprintln!("  {} -> FAILED: {}", file, e);
@@ -305,12 +301,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if let Some(dir) = cached_dir {
-            model_dir = dir.to_string_lossy().to_string();
-            eprintln!("Using cached model dir: {}\n", model_dir);
-        } else {
+        if cached_paths.is_empty() {
             return Err("Failed to download any model files from HuggingFace".into());
         }
+
+        // ORT requires external data files (encoder.onnx.data) to be in the
+        // same real directory as the model file. HF Hub stores files as symlinks
+        // to a blobs/ dir, which causes ORT's path validation to fail.
+        // Work around this by creating a staging directory with hardlinks.
+        let staging_dir = std::env::temp_dir().join("parakeet-rs-benchmark-model");
+        std::fs::create_dir_all(&staging_dir)?;
+
+        for (name, cached_path) in &cached_paths {
+            let dest = staging_dir.join(name);
+            // Remove stale link/file if present
+            let _ = std::fs::remove_file(&dest);
+            // Try hardlink first (fast, no copy), fall back to symlink, then copy
+            if std::fs::hard_link(cached_path, &dest).is_err() {
+                #[cfg(unix)]
+                {
+                    // Resolve the symlink target so we hardlink the actual blob
+                    let real_path = std::fs::canonicalize(cached_path)?;
+                    if std::fs::hard_link(&real_path, &dest).is_err() {
+                        std::fs::copy(&real_path, &dest)?;
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    std::fs::copy(cached_path, &dest)?;
+                }
+            }
+        }
+
+        model_dir = staging_dir.to_string_lossy().to_string();
+        eprintln!("Using staged model dir: {}\n", model_dir);
     }
 
     #[cfg(not(feature = "hf-hub"))]
