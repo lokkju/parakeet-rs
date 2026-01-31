@@ -220,11 +220,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut model_dir = "./nemotron".to_string();
     let mut batch_mode = false;
     let mut verbose = false;
-    #[allow(unused_mut)]
     let mut hf_model: Option<String> = None;
-    #[allow(unused_mut)]
     let mut hf_subdir: Option<String> = None;
-    #[allow(unused_mut)]
     let mut hf_revision = "main".to_string();
 
     let mut i = 2;
@@ -349,8 +346,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[cfg(not(feature = "hf-hub"))]
-    if hf_model.is_some() {
-        return Err("--hf-model requires the 'hf-hub' feature. Rebuild with: --features hf-hub".into());
+    {
+        if hf_model.is_some() || hf_subdir.is_some() {
+            return Err("--hf-model/--hf-subdir/--hf-revision require the 'hf-hub' feature. Rebuild with: --features hf-hub".into());
+        }
+        // Suppress unused warnings when hf-hub feature is off
+        let _ = (&hf_model, &hf_subdir, &hf_revision);
     }
 
     // Enable ORT verbose logging to see EP node placement
