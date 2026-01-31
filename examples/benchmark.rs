@@ -283,7 +283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
 
         let model_files = ["encoder.onnx", "encoder.onnx.data", "decoder_joint.onnx", "tokenizer.model"];
-        let mut cached_paths: Vec<(String, PathBuf)> = Vec::new();
+        let mut cached_dir: Option<PathBuf> = None;
 
         for file in &model_files {
             let hf_path = match &hf_subdir {
@@ -293,7 +293,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match repo.get(&hf_path) {
                 Ok(path) => {
                     eprintln!("  {} -> {}", file, path.display());
-                    cached_paths.push((file.to_string(), path));
+                    if cached_dir.is_none() {
+                        if let Some(parent) = path.parent() {
+                            cached_dir = Some(parent.to_path_buf());
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("  {} -> FAILED: {}", file, e);
@@ -301,32 +305,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if cached_paths.is_empty() {
+        if let Some(dir) = cached_dir {
+            // ORT resolves symlinks when validating external data paths.
+            // HF Hub stores files as symlinks to a blobs/ dir, so ORT sees
+            // the blob directory as the model dir and can't find sibling files.
+            // Fix: create a staging dir with symlinks to the *snapshot* paths
+            // (not the resolved blobs). Then override the model dir to point
+            // at the staging dir. ORT will resolve each file independently
+            // and find them all via their original names.
+            //
+            // Actually — the snapshot dir already has the right filenames as
+            // symlinks. The problem is ORT canonicalizes the .onnx path first,
+            // lands in blobs/, then looks for .onnx.data there.
+            //
+            // Real fix: stage with symlinks pointing at the canonical blob
+            // paths, so ORT resolves the .onnx symlink and lands in the
+            // staging dir (which is a real dir, not a symlink), then finds
+            // .onnx.data as a sibling symlink and resolves that independently.
+            // This works because ORT checks that the *unresolved* relative
+            // path doesn't escape — and it won't, since both files are
+            // siblings in the staging dir.
+            let staging_dir = std::env::temp_dir().join("parakeet-rs-benchmark-model");
+            std::fs::create_dir_all(&staging_dir)?;
+
+            for file in &model_files {
+                let src = dir.join(file);
+                let dest = staging_dir.join(file);
+                let _ = std::fs::remove_file(&dest);
+                if src.exists() {
+                    let real_path = std::fs::canonicalize(&src)?;
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&real_path, &dest)?;
+                    #[cfg(not(unix))]
+                    std::fs::copy(&real_path, &dest)?;
+                }
+            }
+
+            model_dir = staging_dir.to_string_lossy().to_string();
+            eprintln!("Using staged model dir: {}\n", model_dir);
+        } else {
             return Err("Failed to download any model files from HuggingFace".into());
         }
-
-        // ORT requires external data files (encoder.onnx.data) to be in the
-        // same real directory as the model file. HF Hub caches files as
-        // symlinks into a blobs/ dir with hash-based names, so ORT can't
-        // find the external data by its expected relative name.
-        // Fix: hardlink the resolved blobs into a staging dir under their
-        // original names. Hardlinks share inodes — no disk space is copied.
-        let staging_dir = std::env::temp_dir().join("parakeet-rs-benchmark-model");
-        std::fs::create_dir_all(&staging_dir)?;
-
-        for (name, cached_path) in &cached_paths {
-            let dest = staging_dir.join(name);
-            let _ = std::fs::remove_file(&dest);
-            let real_path = std::fs::canonicalize(cached_path)?;
-            if std::fs::hard_link(&real_path, &dest).is_err() {
-                // Cross-device or unsupported — fall back to copy
-                eprintln!("  warning: hardlink failed for {}, copying instead", name);
-                std::fs::copy(&real_path, &dest)?;
-            }
-        }
-
-        model_dir = staging_dir.to_string_lossy().to_string();
-        eprintln!("Using staged model dir: {}\n", model_dir);
     }
 
     #[cfg(not(feature = "hf-hub"))]
