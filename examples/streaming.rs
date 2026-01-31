@@ -45,10 +45,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = hound::WavReader::open(audio_path)?;
     let spec = reader.spec();
 
-    if spec.sample_rate != 16000 {
-        return Err(format!("Expected 16kHz, got {}Hz", spec.sample_rate).into());
-    }
-
     let mut audio: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?,
         hound::SampleFormat::Int => reader
@@ -56,6 +52,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|s| s.map(|s| s as f32 / 32768.0))
             .collect::<Result<Vec<_>, _>>()?,
     };
+
+    // Resample to 16kHz if needed (linear interpolation)
+    if spec.sample_rate != 16000 {
+        let ratio = spec.sample_rate as f64 / 16000.0;
+        let output_len = (audio.len() as f64 / ratio).ceil() as usize;
+        let mut resampled = Vec::with_capacity(output_len);
+        for i in 0..output_len {
+            let src_pos = i as f64 * ratio;
+            let idx = src_pos as usize;
+            let frac = (src_pos - idx as f64) as f32;
+            let sample = if idx + 1 < audio.len() {
+                audio[idx] * (1.0 - frac) + audio[idx + 1] * frac
+            } else {
+                audio[idx.min(audio.len() - 1)]
+            };
+            resampled.push(sample);
+        }
+        eprintln!(
+            "Resampled from {}Hz to 16000Hz ({} -> {} samples)",
+            spec.sample_rate,
+            audio.len(),
+            resampled.len()
+        );
+        audio = resampled;
+    }
 
     if spec.channels > 1 {
         audio = audio
@@ -72,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let duration = audio.len() as f32 / 16000.0;
+    let duration = audio.len() as f32 / 16000.0; // audio is always 16kHz after resampling
 
     if use_eou {
         // EOU model
